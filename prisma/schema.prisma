@@ -3,12 +3,190 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
-model User {
-  id    String @id @default(cuid())
-  email String @unique
-  name  String?
+// ─────────────────────────────────────────
+// ENUMS
+// ─────────────────────────────────────────
+
+enum StaffRole {
+  ADMIN
+  COORDINATOR
+}
+
+enum InviteStatus {
+  PENDING       // imported from CSV, email not sent yet
+  INVITED       // invitation email sent
+  REGISTERED    // alumni completed registration
+  BOUNCED       // email delivery failed
+}
+
+enum BatchStatus {
+  PROCESSING
+  COMPLETED
+  PARTIAL_FAILED
+}
+
+enum RsvpStatus {
+  ATTENDING
+  NOT_ATTENDING
+  MAYBE
+}
+
+enum EmailType {
+  INVITATION
+  EVENT_ANNOUNCEMENT
+  EVENT_REMINDER
+  REGISTRATION_CONFIRMATION
+}
+
+enum EmailStatus {
+  QUEUED
+  SENT
+  FAILED
+  BOUNCED
+}
+
+// ─────────────────────────────────────────
+// MODELS
+// ─────────────────────────────────────────
+
+model Staff {
+  id           String    @id @default(cuid())
+  name         String
+  email        String    @unique
+  passwordHash String
+  role         StaffRole @default(ADMIN)
+  createdAt    DateTime  @default(now())
+  
+  // OTP fields for email verification
+  otpHash      String?
+  otpExpiresAt DateTime?
+  isVerified   Boolean   @default(false)
+  
+  // Refresh tokens for JWT rotation
+  refreshTokens String[]   // Prisma scalar list
+
+  // Relations
+  batches        InvitationBatch[]
+  events         Event[]
+  importedAlumni Alumni[]
+
+  @@map("staff")
+}
+
+model InvitationBatch {
+  id          String      @id @default(cuid())
+  label       String                          // e.g. "CSE Batch 2019"
+  csvFilename String?
+  totalCount  Int         @default(0)
+  sentCount   Int         @default(0)
+  failedCount Int         @default(0)
+  status      BatchStatus @default(PROCESSING)
+  createdById String
+  createdBy   Staff       @relation(fields: [createdById], references: [id])
+  createdAt   DateTime    @default(now())
+  completedAt DateTime?
+
+  alumni      Alumni[]
+
+  @@map("invitation_batches")
+}
+
+model Alumni {
+  id            String       @id @default(cuid())
+  name          String
+  email         String       @unique
+  enrollmentNo  String?
+  batchYear     Int
+  branch        String                         // e.g. "Computer Science"
+  course        String?                        // e.g. "B.Tech", "MBA"
+  phone         String?
+  inviteToken   String?      @unique           // UUID token in email link
+  inviteStatus  InviteStatus @default(PENDING)
+  isRegistered  Boolean      @default(false)
+
+  // Profile fields — filled by alumni after clicking registration link
+  currentRole    String?
+  currentCompany String?
+  city           String?
+  linkedinUrl    String?
+  avatarUrl      String?
+  bio            String?
+
+  // Foreign keys
+  importedById  String?
+  importedBy    Staff?            @relation(fields: [importedById], references: [id])
+  batchId       String?
+  batch         InvitationBatch?  @relation(fields: [batchId], references: [id])
+
+  invitedAt     DateTime?
+  registeredAt  DateTime?
+  createdAt     DateTime    @default(now())
+
+  // Relations
+  rsvps         Rsvp[]
+  emailLogs     EmailLog[]
+
+  // Indexes for fast queries
+  @@index([batchYear])
+  @@index([branch])
+  @@index([inviteStatus])
+  @@index([inviteToken])
+  @@map("alumni")
+}
+
+model Event {
+  id            String    @id @default(cuid())
+  title         String
+  description   String
+  eventDate     DateTime
+  venue         String
+  coverImageUrl String?
+  rsvpDeadline  DateTime?
+  isPublished   Boolean   @default(false)
+  createdById   String
+  createdBy     Staff     @relation(fields: [createdById], references: [id])
+  createdAt     DateTime  @default(now())
+
+  rsvps         Rsvp[]
+  emailLogs     EmailLog[]
+
+  @@map("events")
+}
+
+model Rsvp {
+  id          String     @id @default(cuid())
+  alumniId    String
+  alumni      Alumni     @relation(fields: [alumniId], references: [id])
+  eventId     String
+  event       Event      @relation(fields: [eventId], references: [id])
+  status      RsvpStatus
+  message     String?
+  respondedAt DateTime   @default(now())
+
+  @@unique([alumniId, eventId])  // one RSVP per alumni per event
+  @@index([eventId])
+  @@map("rsvps")
+}
+
+model EmailLog {
+  id              String      @id @default(cuid())
+  recipientEmail  String
+  alumniId        String?
+  alumni          Alumni?     @relation(fields: [alumniId], references: [id])
+  eventId         String?
+  event           Event?      @relation(fields: [eventId], references: [id])
+  type            EmailType
+  status          EmailStatus @default(QUEUED)
+  brevoMessageId  String?     // ID returned by Brevo API for tracking
+  errorMessage    String?
+  sentAt          DateTime    @default(now())
+
+  @@index([recipientEmail])
+  @@index([alumniId])
+  @@map("email_logs")
 }
