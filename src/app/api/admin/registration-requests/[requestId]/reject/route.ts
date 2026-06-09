@@ -4,7 +4,7 @@ import { prisma } from '@/lib/prisma'
 
 export async function POST(
   req: NextRequest,
-  { params }: { params: { requestId: string } }
+  { params }: { params: Promise<{ requestId: string }> }
 ) {
   try {
     const accessToken = req.cookies.get('accessToken')?.value
@@ -21,7 +21,7 @@ export async function POST(
     }
 
     const { rejectionReason } = await req.json()
-    const requestId = params.requestId
+     const { requestId } = await params
 
     const existingRequest = await prisma.registrationRequest.findUnique({
       where: { id: requestId },
