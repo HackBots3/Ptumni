@@ -1,512 +1,407 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import axiosClient from '@/lib/axios-client';
+import { useState, Suspense } from 'react';
+import { useSearchParams, useRouter, usePathname } from 'next/navigation';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import {
+  Plus, Pencil, Trash2, X, Calendar, MapPin, Users,
+  Check, Eye, EyeOff, Search, FileText, ChevronLeft, ChevronRight,
+} from 'lucide-react';
 import { toast } from 'react-hot-toast';
-import { Plus, Pencil, Trash2, X, Calendar, MapPin, Users, Check, Eye, Search } from 'lucide-react';
 
-interface Event {
-  id: string;
-  title: string;
-  description: string;
-  category: string;
-  eventDate: string;
-  venue: string;
-  coverImageUrl: string | null;
-  rsvpDeadline: string | null;
-  isPublished: boolean;
-  attendingCount: number;
-  maybeCount: number;
-  totalRsvps: number;
-  createdBy: {
-    id: string;
-    name: string;
-    email: string;
-  };
+import {
+  getAdminEventsAction,
+  createAdminEventAction,
+  updateAdminEventAction,
+  deleteEventAction,
+  toggleEventPublishAction,
+  getEventRsvpsAction,
+} from '@/actions/events';
+import { CALENDAR_CATEGORIES } from '@/schemas/event';
+import type { EventItemType, RsvpDetailsType } from '@/types/events';
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+function formatDate(dateStr: Date | string) {
+  try {
+    return new Date(dateStr).toLocaleDateString('en-US', {
+      year: 'numeric', month: 'short', day: 'numeric',
+    });
+  } catch { return String(dateStr); }
 }
 
-interface RSVP {
-  id: string;
-  status: 'ATTENDING' | 'NOT_ATTENDING' | 'MAYBE';
-  message: string | null;
-  respondedAt: string;
-  alumni: {
-    id: string;
-    name: string;
-    email: string;
-    batchYear: number;
-    branch: string;
-    course: string | null;
-    currentRole: string | null;
-    currentCompany: string | null;
-    avatarUrl: string | null;
-  };
-}
+const EMPTY_FORM = {
+  title: '',
+  description: '',
+  category: 'General',
+  eventDate: '',
+  venue: '',
+  coverImageUrl: '',
+  rsvpDeadline: '',
+  isPublished: false,
+};
 
-interface RSVPData {
-  eventTitle: string;
-  eventDate: string;
-  totalCount: number;
-  attendingCount: number;
-  maybeCount: number;
-  notAttendingCount: number;
-  rsvps: RSVP[];
-}
+// ─── Admin Events Client ──────────────────────────────────────────────────────
 
-const categories = ['Reunion', 'Workshop', 'Networking', 'Mentorship', 'Sports', 'Panel', 'Webinar', 'General'];
+function AdminEventsClient() {
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const queryClient = useQueryClient();
 
-export default function EventsManagementPage() {
-  const [events, setEvents] = useState<Event[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [submitting, setSubmitting] = useState(false);
+  const searchTerm = searchParams.get('search') || '';
+  const selectedCategory = searchParams.get('category') || 'All';
+  const page = parseInt(searchParams.get('page') || '1', 10);
+  const tab = (searchParams.get('tab') || 'all') as 'all' | 'posted';
+
   const [showModal, setShowModal] = useState(false);
-  const [editingEvent, setEditingEvent] = useState<Event | null>(null);
+  const [editingEvent, setEditingEvent] = useState<EventItemType | null>(null);
+  const [formData, setFormData] = useState({ ...EMPTY_FORM });
 
-  // Form State
-  const [formData, setFormData] = useState({
-    title: '',
-    description: '',
-    category: 'General',
-    eventDate: '',
-    venue: '',
-    coverImageUrl: '',
-    rsvpDeadline: '',
-    isPublished: false,
+  const [rsvpEventId, setRsvpEventId] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<EventItemType | null>(null);
+
+  const setParam = (key: string, value: string) => {
+    const params = new URLSearchParams(searchParams.toString());
+    if (value && value !== 'All') params.set(key, value); else params.delete(key);
+    if (key !== 'page') params.delete('page');
+    router.push(`${pathname}?${params.toString()}`);
+  };
+
+  // ── Events query ──────────────────────────────────────────────────────────
+  const { data, isLoading } = useQuery({
+    queryKey: ['admin-events', { searchTerm, selectedCategory, page, tab }],
+    queryFn: () =>
+      getAdminEventsAction({ search: searchTerm, category: selectedCategory, page, limit: 10, tab }),
   });
 
-  // RSVP details modal
-  const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
-  const [rsvpData, setRsvpData] = useState<RSVPData | null>(null);
-  const [loadingRsvps, setLoadingRsvps] = useState(false);
-  const [rsvpSearch, setRsvpSearch] = useState('');
+  // ── RSVP query ─────────────────────────────────────────────────────────────
+  const { data: rsvpData, isLoading: loadingRsvps } = useQuery<RsvpDetailsType | null>({
+    queryKey: ['admin-event-rsvps', rsvpEventId],
+    queryFn: () => (rsvpEventId ? getEventRsvpsAction(rsvpEventId) : Promise.resolve(null)),
+    enabled: !!rsvpEventId,
+  });
 
-  const fetchEvents = async () => {
-    setLoading(true);
-    try {
-      const res = await axiosClient.get('/api/admin/events');
-      setEvents(res.data);
-    } catch (err: any) {
-      toast.error(err.response?.data?.error || 'Failed to load events');
-    } finally {
-      setLoading(false);
-    }
-  };
+  // ── Mutations ─────────────────────────────────────────────────────────────
+  const saveMutation = useMutation({
+    mutationFn: (fd: typeof EMPTY_FORM) => {
+      const payload = {
+        ...fd,
+        eventDate: new Date(fd.eventDate),
+        rsvpDeadline: fd.rsvpDeadline ? new Date(fd.rsvpDeadline) : undefined,
+        coverImageUrl: fd.coverImageUrl || undefined,
+      };
+      return editingEvent
+        ? updateAdminEventAction(editingEvent.id, payload as any)
+        : createAdminEventAction(payload as any);
+    },
+    onSuccess: (result) => {
+      if (result.success) {
+        toast.success(editingEvent ? 'Event updated!' : 'Event created!');
+        queryClient.invalidateQueries({ queryKey: ['admin-events'] });
+        closeModal();
+      } else {
+        toast.error((result as any).error || 'Something went wrong');
+      }
+    },
+    onError: () => toast.error('Something went wrong'),
+  });
 
-  const fetchRsvps = async (eventId: string) => {
-    setLoadingRsvps(true);
-    try {
-      const res = await axiosClient.get(`/api/admin/events/${eventId}/rsvps`);
-      setRsvpData(res.data);
-    } catch (err: any) {
-      toast.error(err.response?.data?.error || 'Failed to load RSVPs');
-    } finally {
-      setLoadingRsvps(false);
-    }
-  };
+  const deleteMutation = useMutation({
+    mutationFn: (id: string) => deleteEventAction(id),
+    onSuccess: (result) => {
+      if (result.success) {
+        toast.success('Event deleted');
+        queryClient.invalidateQueries({ queryKey: ['admin-events'] });
+        setDeleteTarget(null);
+      } else {
+        toast.error((result as any).error || 'Failed to delete event');
+      }
+    },
+    onError: () => toast.error('Something went wrong'),
+  });
 
-  useEffect(() => {
-    fetchEvents();
-  }, []);
+  const togglePublishMutation = useMutation({
+    mutationFn: ({ id, isPublished }: { id: string; isPublished: boolean }) =>
+      toggleEventPublishAction(id, isPublished),
+    onSuccess: (result, vars) => {
+      if (result.success) {
+        toast.success(vars.isPublished ? 'Event published' : 'Event unpublished');
+        queryClient.invalidateQueries({ queryKey: ['admin-events'] });
+      } else {
+        toast.error('Failed to update publish status');
+      }
+    },
+  });
 
-  const openCreateModal = () => {
+  // ── Modal helpers ─────────────────────────────────────────────────────────
+  const openCreate = () => {
     setEditingEvent(null);
-    setFormData({
-      title: '',
-      description: '',
-      category: 'General',
-      eventDate: '',
-      venue: '',
-      coverImageUrl: '',
-      rsvpDeadline: '',
-      isPublished: false,
-    });
+    setFormData({ ...EMPTY_FORM });
     setShowModal(true);
   };
 
-  const openEditModal = (event: Event) => {
+  const openEdit = (event: EventItemType) => {
     setEditingEvent(event);
-    
-    // Format dates for datetime-local input (YYYY-MM-DDThh:mm)
-    const formatForInput = (dateStr: string | null) => {
-      if (!dateStr) return '';
-      const date = new Date(dateStr);
-      const tzOffset = date.getTimezoneOffset() * 60000; // offset in milliseconds
-      const localISOTime = (new Date(date.getTime() - tzOffset)).toISOString().slice(0, 16);
-      return localISOTime;
-    };
-
     setFormData({
       title: event.title,
       description: event.description,
       category: event.category,
-      eventDate: formatForInput(event.eventDate),
-      coverImageUrl: event.coverImageUrl || '',
+      eventDate: new Date(event.eventDate).toISOString().slice(0, 16),
       venue: event.venue,
-      rsvpDeadline: formatForInput(event.rsvpDeadline),
+      coverImageUrl: event.coverImageUrl || '',
+      rsvpDeadline: event.rsvpDeadline ? new Date(event.rsvpDeadline as string).toISOString().slice(0, 16) : '',
       isPublished: event.isPublished,
     });
     setShowModal(true);
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!formData.title || !formData.description || !formData.eventDate || !formData.venue) {
-      toast.error('Please fill in all required fields');
-      return;
-    }
+  const closeModal = () => { setShowModal(false); setEditingEvent(null); };
 
-    setSubmitting(true);
-    try {
-      const payload = {
-        ...formData,
-        coverImageUrl: formData.coverImageUrl || null,
-        rsvpDeadline: formData.rsvpDeadline || null,
-      };
-
-      if (editingEvent) {
-        await axiosClient.put(`/api/admin/events/${editingEvent.id}`, payload);
-        toast.success('Event updated successfully');
-      } else {
-        await axiosClient.post('/api/admin/events', payload);
-        toast.success('Event created successfully');
-      }
-      fetchEvents();
-      setShowModal(false);
-    } catch (err: any) {
-      toast.error(err.response?.data?.error || 'Operation failed');
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const handleTogglePublish = async (event: Event) => {
-    try {
-      await axiosClient.put(`/api/admin/events/${event.id}`, {
-        title: event.title,
-        description: event.description,
-        category: event.category,
-        eventDate: event.eventDate,
-        venue: event.venue,
-        coverImageUrl: event.coverImageUrl,
-        rsvpDeadline: event.rsvpDeadline,
-        isPublished: !event.isPublished,
-      });
-      toast.success(event.isPublished ? 'Event unpublished' : 'Event published');
-      fetchEvents();
-    } catch (err: any) {
-      toast.error(err.response?.data?.error || 'Failed to update status');
-    }
-  };
-
-  const handleDelete = async (id: string) => {
-    if (!confirm('Are you sure you want to delete this event? This will delete all RSVPs for this event too.')) return;
-    try {
-      await axiosClient.delete(`/api/admin/events/${id}`);
-      toast.success('Event deleted successfully');
-      fetchEvents();
-    } catch (err: any) {
-      toast.error(err.response?.data?.error || 'Failed to delete event');
-    }
-  };
-
-  const openRsvpModal = (eventId: string) => {
-    setSelectedEventId(eventId);
-    setRsvpSearch('');
-    fetchRsvps(eventId);
-  };
-
-  const closeRsvpModal = () => {
-    setSelectedEventId(null);
-    setRsvpData(null);
-  };
-
-  const filteredRsvps = rsvpData?.rsvps.filter(rsvp => {
-    const searchLower = rsvpSearch.toLowerCase();
-    return (
-      rsvp.alumni.name.toLowerCase().includes(searchLower) ||
-      rsvp.alumni.email.toLowerCase().includes(searchLower) ||
-      (rsvp.alumni.currentCompany && rsvp.alumni.currentCompany.toLowerCase().includes(searchLower)) ||
-      (rsvp.alumni.currentRole && rsvp.alumni.currentRole.toLowerCase().includes(searchLower)) ||
-      rsvp.alumni.branch.toLowerCase().includes(searchLower)
-    );
-  }) || [];
+  const events = data?.events || [];
+  const pagination = data?.pagination;
+  const allCategories = ['All', ...CALENDAR_CATEGORIES];
 
   return (
     <div className="space-y-6">
       {/* Header */}
-      <section className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm sm:p-8 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
         <div>
-          <p className="text-xs font-semibold uppercase tracking-[0.2em] text-[#003D7A]">Admin Module</p>
-          <h1 className="mt-2 text-2xl font-bold text-slate-900 sm:text-3xl">Events Management</h1>
-          <p className="mt-2 text-sm text-slate-600">
-            Create, publish, and track events for the alumni community. Manage registrations and analyze attendance.
+          <h1 className="text-2xl font-bold text-gray-900">Events Management</h1>
+          <p className="text-sm text-slate-500 mt-0.5">
+            {isLoading ? '…' : `${pagination?.totalCount ?? 0} events`}
           </p>
         </div>
         <button
-          onClick={openCreateModal}
-          className="inline-flex items-center gap-2 rounded-xl bg-[#003D7A] hover:bg-[#002654] text-white px-5 py-3 text-sm font-semibold shadow-sm transition-all focus:outline-none focus:ring-2 focus:ring-[#003D7A]/50 self-start sm:self-center"
+          onClick={openCreate}
+          className="flex items-center gap-2 px-4 py-2.5 bg-[#003D7A] hover:bg-[#002b56] text-white text-sm font-bold rounded-xl transition shadow-sm"
         >
           <Plus size={18} />
-          Create Event
+          <span>Create Event</span>
         </button>
-      </section>
+      </div>
 
-      {/* Events List */}
-      <div className="bg-white rounded-3xl border border-slate-200 overflow-hidden shadow-sm">
-        {loading ? (
-          <div className="p-12 text-center text-slate-500">Loading events...</div>
+      {/* Filters */}
+      <div className="bg-white rounded-2xl border border-slate-200 p-4 space-y-4 shadow-sm">
+        <div className="flex flex-col sm:flex-row gap-3">
+          <div className="relative flex-1">
+            <Search className="absolute left-3 top-2.5 text-slate-400" size={16} />
+            <input
+              type="text"
+              placeholder="Search events..."
+              defaultValue={searchTerm}
+              onBlur={(e) => setParam('search', e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && setParam('search', (e.target as HTMLInputElement).value)}
+              className="w-full pl-9 pr-3 py-2 border border-slate-200 rounded-xl focus:outline-none focus:border-[#003D7A] text-sm"
+            />
+          </div>
+          <select
+            value={selectedCategory}
+            onChange={(e) => setParam('category', e.target.value)}
+            className="px-3 py-2 border border-slate-200 rounded-xl focus:outline-none focus:border-[#003D7A] text-sm bg-white"
+          >
+            {allCategories.map((cat) => (
+              <option key={cat} value={cat}>{cat}</option>
+            ))}
+          </select>
+        </div>
+
+        {/* Tabs */}
+        <div className="flex gap-2">
+          {([['all', 'All Events'], ['posted', 'My Events']] as const).map(([id, label]) => (
+            <button
+              key={id}
+              onClick={() => setParam('tab', id)}
+              className={`px-4 py-1.5 rounded-full text-xs font-bold transition ${
+                tab === id ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Events Table */}
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+        {isLoading ? (
+          <div className="p-8 space-y-3">
+            {[1, 2, 3].map((n) => (
+              <div key={n} className="flex gap-4 animate-pulse">
+                <div className="w-12 h-12 bg-slate-100 rounded-xl shrink-0" />
+                <div className="flex-1 space-y-2">
+                  <div className="h-4 bg-slate-100 rounded w-1/3" />
+                  <div className="h-3 bg-slate-100 rounded w-1/5" />
+                </div>
+              </div>
+            ))}
+          </div>
         ) : events.length === 0 ? (
           <div className="p-12 text-center text-slate-500">
-            <Calendar className="mx-auto text-slate-300 mb-3" size={40} />
-            <p className="text-lg font-medium">No events found</p>
-            <p className="text-sm text-slate-400 mt-1">Get started by creating your first alumni event!</p>
+            <Calendar className="mx-auto mb-3 text-slate-300" size={40} />
+            <p className="font-semibold">No events found</p>
           </div>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-left border-collapse">
-              <thead>
-                <tr className="bg-slate-50 border-b border-slate-100 text-xs font-bold uppercase text-slate-500 tracking-wider">
-                  <th className="px-6 py-4">Event Details</th>
-                  <th className="px-6 py-4">Date & Time</th>
-                  <th className="px-6 py-4">Venue</th>
-                  <th className="px-6 py-4">Status</th>
-                  <th className="px-6 py-4">RSVPs</th>
-                  <th className="px-6 py-4 text-right">Actions</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100 text-sm text-slate-700">
-                {events.map((event) => {
-                  const hasPassed = new Date() > new Date(event.eventDate);
-                  return (
-                    <tr key={event.id} className="hover:bg-slate-50/50 transition-colors">
-                      <td className="px-6 py-4">
-                        <div className="flex items-center gap-4">
-                          <div className="w-12 h-12 rounded-xl bg-slate-100 flex items-center justify-center text-xl overflow-hidden shrink-0 border border-slate-200">
-                            {event.coverImageUrl ? (
-                              <img src={event.coverImageUrl} alt={event.title} className="w-full h-full object-cover" />
-                            ) : (
-                              <span className="text-[#003D7A] font-bold">📅</span>
-                            )}
-                          </div>
-                          <div>
-                            <p className="font-semibold text-slate-900 line-clamp-1">{event.title}</p>
-                            <span className="inline-block mt-1 px-2.5 py-0.5 bg-[#003D7A]/5 text-[#003D7A] font-medium text-xs rounded-full">
-                              {event.category}
-                            </span>
-                          </div>
-                        </div>
-                      </td>
-                      <td className="px-6 py-4">
-                        <p className="font-medium text-slate-900">
-                          {new Date(event.eventDate).toLocaleDateString('en-US', {
-                            month: 'short',
-                            day: 'numeric',
-                            year: 'numeric',
-                          })}
-                        </p>
-                        <p className="text-xs text-slate-500">
-                          {new Date(event.eventDate).toLocaleTimeString('en-US', {
-                            hour: '2-digit',
-                            minute: '2-digit',
-                          })}
-                        </p>
-                      </td>
-                      <td className="px-6 py-4 font-medium text-slate-800">{event.venue}</td>
-                      <td className="px-6 py-4">
-                        {hasPassed ? (
-                          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-gray-100 text-gray-700">
-                            Concluded
-                          </span>
-                        ) : event.isPublished ? (
-                          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-50 text-emerald-700">
-                            Active / Published
-                          </span>
-                        ) : (
-                          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-50 text-amber-700">
-                            Draft
-                          </span>
-                        )}
-                      </td>
-                      <td className="px-6 py-4">
-                        <button
-                          onClick={() => openRsvpModal(event.id)}
-                          className="flex items-center gap-2 hover:bg-slate-100 p-2 rounded-xl transition group text-left"
-                        >
-                          <div className="bg-slate-100 group-hover:bg-white p-1.5 rounded-lg border border-slate-200">
-                            <Users size={16} className="text-slate-500" />
-                          </div>
-                          <div>
-                            <p className="text-sm font-semibold text-slate-900">{event.attendingCount} Attending</p>
-                            <p className="text-xs text-slate-400">{event.totalRsvps} Total RSVP</p>
-                          </div>
-                        </button>
-                      </td>
-                      <td className="px-6 py-4 text-right">
-                        <div className="flex justify-end gap-2">
-                          <button
-                            onClick={() => handleTogglePublish(event)}
-                            disabled={hasPassed}
-                            className={`p-2 rounded-xl border text-xs font-medium transition ${
-                              hasPassed
-                                ? 'bg-slate-50 border-slate-100 text-slate-300 cursor-not-allowed'
-                                : event.isPublished
-                                ? 'border-[#C41E3A]/20 bg-[#C41E3A]/5 text-[#C41E3A] hover:bg-[#C41E3A]/10'
-                                : 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100'
-                            }`}
-                            title={event.isPublished ? 'Unpublish Event' : 'Publish Event'}
-                          >
-                            {event.isPublished ? 'Unpublish' : 'Publish'}
-                          </button>
-                          <button
-                            onClick={() => openEditModal(event)}
-                            className="p-2 text-slate-600 hover:bg-slate-100 rounded-xl transition border border-slate-200"
-                            title="Edit Event"
-                          >
-                            <Pencil size={16} />
-                          </button>
-                          <button
-                            onClick={() => handleDelete(event.id)}
-                            className="p-2 text-[#C41E3A] hover:bg-red-50 hover:text-red-700 rounded-xl transition border border-red-100"
-                            title="Delete Event"
-                          >
-                            <Trash2 size={16} />
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+          <div className="divide-y divide-slate-100">
+            {events.map((event) => (
+              <AdminEventRow
+                key={event.id}
+                event={event}
+                onEdit={openEdit}
+                onDelete={setDeleteTarget}
+                onViewRsvp={(id) => setRsvpEventId(id)}
+                onTogglePublish={(id, pub) => togglePublishMutation.mutate({ id, isPublished: pub })}
+              />
+            ))}
           </div>
         )}
       </div>
 
+      {/* Pagination */}
+      {pagination && pagination.totalPages > 1 && (
+        <div className="flex items-center justify-between text-sm text-slate-600 border-t border-slate-100 pt-4">
+          <button
+            disabled={page <= 1}
+            onClick={() => setParam('page', String(page - 1))}
+            className="flex items-center gap-1.5 px-3.5 py-2 border border-slate-200 rounded-lg hover:bg-slate-50 font-semibold disabled:opacity-40"
+          >
+            <ChevronLeft size={16} />Previous
+          </button>
+          <span className="font-semibold text-slate-700">Page {page} of {pagination.totalPages}</span>
+          <button
+            disabled={page >= pagination.totalPages}
+            onClick={() => setParam('page', String(page + 1))}
+            className="flex items-center gap-1.5 px-3.5 py-2 border border-slate-200 rounded-lg hover:bg-slate-50 font-semibold disabled:opacity-40"
+          >
+            Next<ChevronRight size={16} />
+          </button>
+        </div>
+      )}
+
       {/* Create / Edit Modal */}
       {showModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="bg-white rounded-3xl w-full max-w-2xl overflow-hidden shadow-2xl border border-slate-200 flex flex-col max-h-[90vh]">
-            <div className="flex justify-between items-center px-6 py-4 border-b border-slate-100">
-              <h2 className="text-lg font-bold text-slate-900">{editingEvent ? 'Edit Event' : 'Create Event'}</h2>
-              <button onClick={() => setShowModal(false)} className="text-slate-400 hover:text-slate-600 transition p-1 hover:bg-slate-100 rounded-lg">
-                <X size={20} />
+        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] flex flex-col overflow-hidden border border-slate-100">
+            <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50 shrink-0">
+              <h3 className="font-bold text-gray-900">{editingEvent ? 'Edit Event' : 'Create New Event'}</h3>
+              <button onClick={closeModal} className="text-slate-400 hover:text-slate-600 transition p-1 hover:bg-slate-200 rounded-full">
+                <X size={18} />
               </button>
             </div>
-            
-            <form onSubmit={handleSubmit} className="p-6 overflow-y-auto space-y-4 flex-1">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div className="col-span-2">
-                  <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1">Title *</label>
-                  <input
-                    type="text"
-                    required
-                    value={formData.title}
-                    onChange={(e) => setFormData({ ...formData, title: e.target.value })}
-                    className="w-full px-4 py-2.5 border border-slate-300 rounded-xl focus:outline-none focus:border-[#003D7A] transition text-sm"
-                    placeholder="e.g. Annual Alumni Meet 2026"
-                  />
-                </div>
 
+            <form
+              onSubmit={(e) => { e.preventDefault(); saveMutation.mutate(formData); }}
+              className="p-6 space-y-4 overflow-y-auto"
+            >
+              {/* Title */}
+              <div>
+                <label className="block text-xs font-bold uppercase tracking-wider text-gray-500 mb-1.5">Title *</label>
+                <input
+                  type="text" required
+                  value={formData.title}
+                  onChange={(e) => setFormData({ ...formData, title: e.target.value })}
+                  className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:outline-none focus:border-[#003D7A] text-sm"
+                  placeholder="Annual Alumni Reunion"
+                />
+              </div>
+
+              {/* Description */}
+              <div>
+                <label className="block text-xs font-bold uppercase tracking-wider text-gray-500 mb-1.5">Description *</label>
+                <textarea
+                  required rows={4}
+                  value={formData.description}
+                  onChange={(e) => setFormData({ ...formData, description: e.target.value })}
+                  className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:outline-none focus:border-[#003D7A] text-sm resize-none"
+                  placeholder="Describe the event..."
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                {/* Category */}
                 <div>
-                  <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1">Category *</label>
+                  <label className="block text-xs font-bold uppercase tracking-wider text-gray-500 mb-1.5">Category *</label>
                   <select
                     value={formData.category}
                     onChange={(e) => setFormData({ ...formData, category: e.target.value })}
-                    className="w-full px-4 py-2.5 border border-slate-300 rounded-xl bg-white focus:outline-none focus:border-[#003D7A] transition text-sm"
+                    className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:outline-none focus:border-[#003D7A] text-sm bg-white"
                   >
-                    {categories.map((cat) => (
-                      <option key={cat} value={cat}>
-                        {cat}
-                      </option>
-                    ))}
+                    {CALENDAR_CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
                   </select>
                 </div>
 
+                {/* Status */}
                 <div>
-                  <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1">Venue *</label>
-                  <input
-                    type="text"
-                    required
-                    value={formData.venue}
-                    onChange={(e) => setFormData({ ...formData, venue: e.target.value })}
-                    className="w-full px-4 py-2.5 border border-slate-300 rounded-xl focus:outline-none focus:border-[#003D7A] transition text-sm"
-                    placeholder="e.g. Main Auditorium, Campus"
-                  />
+                  <label className="block text-xs font-bold uppercase tracking-wider text-gray-500 mb-1.5">Status</label>
+                  <select
+                    value={formData.isPublished ? 'true' : 'false'}
+                    onChange={(e) => setFormData({ ...formData, isPublished: e.target.value === 'true' })}
+                    className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:outline-none focus:border-[#003D7A] text-sm bg-white"
+                  >
+                    <option value="true">Published</option>
+                    <option value="false">Draft</option>
+                  </select>
                 </div>
+              </div>
 
+              <div className="grid grid-cols-2 gap-3">
+                {/* Event Date */}
                 <div>
-                  <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1">Event Date & Time *</label>
+                  <label className="block text-xs font-bold uppercase tracking-wider text-gray-500 mb-1.5">Event Date *</label>
                   <input
-                    type="datetime-local"
-                    required
+                    type="datetime-local" required
                     value={formData.eventDate}
                     onChange={(e) => setFormData({ ...formData, eventDate: e.target.value })}
-                    className="w-full px-4 py-2.5 border border-slate-300 rounded-xl focus:outline-none focus:border-[#003D7A] transition text-sm"
+                    className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:outline-none focus:border-[#003D7A] text-sm"
                   />
                 </div>
 
+                {/* RSVP Deadline */}
                 <div>
-                  <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1">RSVP Deadline (Optional)</label>
+                  <label className="block text-xs font-bold uppercase tracking-wider text-gray-500 mb-1.5">RSVP Deadline</label>
                   <input
                     type="datetime-local"
                     value={formData.rsvpDeadline}
                     onChange={(e) => setFormData({ ...formData, rsvpDeadline: e.target.value })}
-                    className="w-full px-4 py-2.5 border border-slate-300 rounded-xl focus:outline-none focus:border-[#003D7A] transition text-sm"
+                    className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:outline-none focus:border-[#003D7A] text-sm"
                   />
-                </div>
-
-                <div className="col-span-2">
-                  <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1">Cover Image URL (Optional)</label>
-                  <input
-                    type="url"
-                    value={formData.coverImageUrl}
-                    onChange={(e) => setFormData({ ...formData, coverImageUrl: e.target.value })}
-                    className="w-full px-4 py-2.5 border border-slate-300 rounded-xl focus:outline-none focus:border-[#003D7A] transition text-sm"
-                    placeholder="https://example.com/image.jpg"
-                  />
-                </div>
-
-                <div className="col-span-2">
-                  <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1">Description *</label>
-                  <textarea
-                    required
-                    rows={4}
-                    value={formData.description}
-                    onChange={(e) => setFormData({ ...formData, description: e.target.value })}
-                    className="w-full px-4 py-2.5 border border-slate-300 rounded-xl focus:outline-none focus:border-[#003D7A] transition text-sm"
-                    placeholder="Write details about the event, activities, guest speakers, etc..."
-                  />
-                </div>
-
-                <div className="col-span-2 flex items-center gap-2 py-2">
-                  <input
-                    type="checkbox"
-                    id="isPublished"
-                    checked={formData.isPublished}
-                    onChange={(e) => setFormData({ ...formData, isPublished: e.target.checked })}
-                    className="h-4.5 w-4.5 rounded text-[#003D7A] focus:ring-[#003D7A]"
-                  />
-                  <label htmlFor="isPublished" className="text-sm font-semibold text-slate-700 select-none cursor-pointer">
-                    Publish this event immediately (visible in the alumni portal)
-                  </label>
                 </div>
               </div>
 
-              <div className="flex justify-end gap-3 pt-4 border-t border-slate-100">
-                <button
-                  type="button"
-                  onClick={() => setShowModal(false)}
-                  className="px-5 py-2.5 border border-slate-200 rounded-xl text-slate-700 hover:bg-slate-50 font-semibold transition text-sm"
-                >
+              {/* Venue */}
+              <div>
+                <label className="block text-xs font-bold uppercase tracking-wider text-gray-500 mb-1.5">Venue *</label>
+                <input
+                  type="text" required
+                  value={formData.venue}
+                  onChange={(e) => setFormData({ ...formData, venue: e.target.value })}
+                  className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:outline-none focus:border-[#003D7A] text-sm"
+                  placeholder="e.g. PTU Main Campus, Kapurthala"
+                />
+              </div>
+
+              {/* Cover Image */}
+              <div>
+                <label className="block text-xs font-bold uppercase tracking-wider text-gray-500 mb-1.5">Cover Image URL</label>
+                <input
+                  type="url"
+                  value={formData.coverImageUrl}
+                  onChange={(e) => setFormData({ ...formData, coverImageUrl: e.target.value })}
+                  className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:outline-none focus:border-[#003D7A] text-sm"
+                  placeholder="https://..."
+                />
+              </div>
+
+              <div className="flex gap-3 pt-2">
+                <button type="button" onClick={closeModal} className="flex-1 py-2.5 border border-slate-200 text-slate-600 text-sm font-bold rounded-xl hover:bg-slate-50 transition">
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  disabled={submitting}
-                  className="px-5 py-2.5 bg-[#003D7A] hover:bg-[#002654] text-white rounded-xl font-semibold transition text-sm flex items-center gap-2"
+                  disabled={saveMutation.isPending}
+                  className="flex-1 py-2.5 bg-[#003D7A] hover:bg-[#002b56] text-white text-sm font-bold rounded-xl transition disabled:opacity-60"
                 >
-                  {submitting && <span className="animate-spin h-4 w-4 border-2 border-white border-t-transparent rounded-full" />}
-                  {editingEvent ? 'Update Event' : 'Create Event'}
+                  {saveMutation.isPending ? 'Saving…' : editingEvent ? 'Save Changes' : 'Create Event'}
                 </button>
               </div>
             </form>
@@ -514,154 +409,215 @@ export default function EventsManagementPage() {
         </div>
       )}
 
-      {/* RSVPs Modal */}
-      {selectedEventId && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="bg-white rounded-3xl w-full max-w-4xl overflow-hidden shadow-2xl border border-slate-200 flex flex-col max-h-[90vh]">
-            <div className="flex justify-between items-center px-6 py-4 border-b border-slate-100">
+      {/* Delete Confirm Modal */}
+      {deleteTarget && (
+        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-sm border border-slate-100 p-6 space-y-5">
+            <div className="text-center">
+              <div className="w-12 h-12 bg-rose-100 rounded-full flex items-center justify-center mx-auto mb-3">
+                <Trash2 className="text-rose-600" size={20} />
+              </div>
+              <h3 className="font-bold text-gray-900">Delete Event?</h3>
+              <p className="text-sm text-slate-500 mt-1">
+                <span className="font-semibold">"{deleteTarget.title}"</span> and all RSVPs will be permanently deleted.
+              </p>
+            </div>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setDeleteTarget(null)}
+                className="flex-1 py-2.5 border border-slate-200 text-slate-700 font-bold rounded-xl hover:bg-slate-50 transition text-sm"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => deleteMutation.mutate(deleteTarget.id)}
+                disabled={deleteMutation.isPending}
+                className="flex-1 py-2.5 bg-rose-600 hover:bg-rose-700 text-white font-bold rounded-xl transition text-sm disabled:opacity-60"
+              >
+                {deleteMutation.isPending ? 'Deleting…' : 'Delete'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* RSVP Details Modal */}
+      {rsvpEventId && (
+        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-2xl max-h-[85vh] flex flex-col border border-slate-100 overflow-hidden">
+            <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50 shrink-0">
               <div>
-                <h2 className="text-lg font-bold text-slate-900">Event RSVP Details</h2>
+                <h3 className="font-bold text-gray-900">Event RSVPs</h3>
                 {rsvpData && (
-                  <p className="text-xs text-slate-500 mt-0.5">
-                    For event: <span className="font-semibold text-slate-700">{rsvpData.eventTitle}</span>
-                  </p>
+                  <p className="text-xs text-slate-500 mt-0.5">{rsvpData.eventTitle} · {formatDate(rsvpData.eventDate)}</p>
                 )}
               </div>
-              <button onClick={closeRsvpModal} className="text-slate-400 hover:text-slate-600 transition p-1 hover:bg-slate-100 rounded-lg">
-                <X size={20} />
+              <button onClick={() => setRsvpEventId(null)} className="text-slate-400 hover:text-slate-600 p-1 hover:bg-slate-200 rounded-full transition">
+                <X size={18} />
               </button>
             </div>
 
-            {loadingRsvps ? (
-              <div className="p-12 text-center text-slate-500 flex-1">Loading RSVP details...</div>
-            ) : !rsvpData ? (
-              <div className="p-12 text-center text-slate-500 flex-1">Failed to load RSVP data.</div>
-            ) : (
-              <div className="flex flex-col flex-1 overflow-hidden">
-                {/* RSVP Status Counters */}
-                <div className="grid grid-cols-4 border-b border-slate-100 bg-slate-50/50 p-4 gap-4 text-center">
-                  <div className="bg-white p-3 rounded-2xl border border-slate-200 shadow-sm">
-                    <p className="text-xs font-semibold text-slate-400 uppercase">Total RSVPs</p>
-                    <p className="text-2xl font-bold text-slate-900 mt-1">{rsvpData.totalCount}</p>
+            <div className="flex-1 overflow-y-auto">
+              {loadingRsvps ? (
+                <div className="p-8 text-center text-slate-500">Loading RSVPs…</div>
+              ) : !rsvpData ? (
+                <div className="p-8 text-center text-slate-500">No data found</div>
+              ) : (
+                <>
+                  {/* Summary badges */}
+                  <div className="px-6 py-4 grid grid-cols-3 gap-3 border-b border-slate-100">
+                    {[
+                      { label: 'Attending', count: rsvpData.attendingCount, color: 'text-emerald-700 bg-emerald-50 border-emerald-200' },
+                      { label: 'Maybe', count: rsvpData.maybeCount, color: 'text-amber-700 bg-amber-50 border-amber-200' },
+                      { label: 'Not Going', count: rsvpData.notAttendingCount, color: 'text-rose-700 bg-rose-50 border-rose-200' },
+                    ].map(({ label, count, color }) => (
+                      <div key={label} className={`text-center p-3 rounded-xl border ${color}`}>
+                        <div className="text-2xl font-black">{count}</div>
+                        <div className="text-xs font-bold mt-0.5">{label}</div>
+                      </div>
+                    ))}
                   </div>
-                  <div className="bg-white p-3 rounded-2xl border border-slate-200 shadow-sm border-l-4 border-l-emerald-500">
-                    <p className="text-xs font-semibold text-emerald-600 uppercase">Attending</p>
-                    <p className="text-2xl font-bold text-slate-900 mt-1">{rsvpData.attendingCount}</p>
-                  </div>
-                  <div className="bg-white p-3 rounded-2xl border border-slate-200 shadow-sm border-l-4 border-l-amber-500">
-                    <p className="text-xs font-semibold text-amber-600 uppercase">Maybe</p>
-                    <p className="text-2xl font-bold text-slate-900 mt-1">{rsvpData.maybeCount}</p>
-                  </div>
-                  <div className="bg-white p-3 rounded-2xl border border-slate-200 shadow-sm border-l-4 border-l-red-500">
-                    <p className="text-xs font-semibold text-red-600 uppercase">Not Attending</p>
-                    <p className="text-2xl font-bold text-slate-900 mt-1">{rsvpData.notAttendingCount}</p>
-                  </div>
-                </div>
 
-                {/* Search / Filter */}
-                <div className="p-4 border-b border-slate-100 flex items-center gap-3">
-                  <div className="relative flex-1">
-                    <Search className="absolute left-3 top-2.5 text-slate-400" size={18} />
-                    <input
-                      type="text"
-                      placeholder="Search respondents by name, email, batch, branch, current company/role..."
-                      value={rsvpSearch}
-                      onChange={(e) => setRsvpSearch(e.target.value)}
-                      className="w-full pl-10 pr-4 py-2 border border-slate-200 rounded-xl focus:outline-none focus:border-[#003D7A] transition text-sm"
-                    />
+                  {/* RSVP list */}
+                  <div className="divide-y divide-slate-100">
+                    {rsvpData.rsvps.length === 0 ? (
+                      <div className="p-8 text-center text-slate-500">No RSVPs yet</div>
+                    ) : rsvpData.rsvps.map((rsvp) => (
+                      <div key={rsvp.id} className="flex items-center gap-4 p-4 hover:bg-slate-50">
+                        <div className="w-10 h-10 bg-slate-200 rounded-full overflow-hidden shrink-0">
+                          {rsvp.alumni.avatarUrl ? (
+                            <img src={rsvp.alumni.avatarUrl} alt={rsvp.alumni.name} className="w-full h-full object-cover" />
+                          ) : (
+                            <div className="w-full h-full flex items-center justify-center text-slate-400 font-bold text-sm">
+                              {rsvp.alumni.name.charAt(0).toUpperCase()}
+                            </div>
+                          )}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p className="font-bold text-sm text-gray-900 truncate">{rsvp.alumni.name}</p>
+                          <p className="text-xs text-slate-500 truncate">{rsvp.alumni.email}</p>
+                          <p className="text-xs text-slate-400">{rsvp.alumni.batchYear} · {rsvp.alumni.branch}</p>
+                        </div>
+                        <span className={`px-2.5 py-1 rounded-full text-xs font-bold shrink-0 ${
+                          rsvp.status === 'ATTENDING' ? 'bg-emerald-100 text-emerald-800' :
+                          rsvp.status === 'MAYBE' ? 'bg-amber-100 text-amber-800' :
+                          'bg-rose-100 text-rose-800'
+                        }`}>
+                          {rsvp.status.replace('_', ' ')}
+                        </span>
+                      </div>
+                    ))}
                   </div>
-                </div>
-
-                {/* RSVP list */}
-                <div className="overflow-y-auto flex-1">
-                  {filteredRsvps.length === 0 ? (
-                    <div className="p-12 text-center text-slate-400">No respondents found matching your filters.</div>
-                  ) : (
-                    <table className="w-full text-left border-collapse">
-                      <thead>
-                        <tr className="bg-slate-50/50 border-b border-slate-100 text-xs font-semibold uppercase text-slate-500 tracking-wider">
-                          <th className="px-6 py-3">Alumni</th>
-                          <th className="px-6 py-3">Batch & Branch</th>
-                          <th className="px-6 py-3">Current Employment</th>
-                          <th className="px-6 py-3">Status</th>
-                          <th className="px-6 py-3">Message</th>
-                          <th className="px-6 py-3">Responded At</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-100 text-sm text-slate-700">
-                        {filteredRsvps.map((rsvp) => (
-                          <tr key={rsvp.id} className="hover:bg-slate-50/20 transition-colors">
-                            <td className="px-6 py-3">
-                              <div className="flex items-center gap-3">
-                                <div className="w-9 h-9 rounded-full bg-[#003D7A] text-white flex items-center justify-center font-bold text-sm shrink-0 uppercase">
-                                  {rsvp.alumni.avatarUrl ? (
-                                    <img src={rsvp.alumni.avatarUrl} alt={rsvp.alumni.name} className="w-full h-full object-cover rounded-full" />
-                                  ) : (
-                                    rsvp.alumni.name.charAt(0)
-                                  )}
-                                </div>
-                                <div>
-                                  <p className="font-semibold text-slate-900">{rsvp.alumni.name}</p>
-                                  <p className="text-xs text-slate-400">{rsvp.alumni.email}</p>
-                                </div>
-                              </div>
-                            </td>
-                            <td className="px-6 py-3">
-                              <p className="font-medium text-slate-800">{rsvp.alumni.branch}</p>
-                              <p className="text-xs text-slate-500">Batch {rsvp.alumni.batchYear} {rsvp.alumni.course ? `(${rsvp.alumni.course})` : ''}</p>
-                            </td>
-                            <td className="px-6 py-3">
-                              {rsvp.alumni.currentRole || rsvp.alumni.currentCompany ? (
-                                <>
-                                  <p className="font-medium text-slate-800 line-clamp-1">{rsvp.alumni.currentRole || 'Alumni'}</p>
-                                  <p className="text-xs text-slate-500 line-clamp-1">{rsvp.alumni.currentCompany || 'Self Employed'}</p>
-                                </>
-                              ) : (
-                                <p className="text-slate-400 italic">Not Provided</p>
-                              )}
-                            </td>
-                            <td className="px-6 py-3">
-                              {rsvp.status === 'ATTENDING' ? (
-                                <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-emerald-50 text-emerald-700 ring-1 ring-inset ring-emerald-600/20">
-                                  Attending
-                                </span>
-                              ) : rsvp.status === 'MAYBE' ? (
-                                <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-amber-50 text-amber-700 ring-1 ring-inset ring-amber-600/20">
-                                  Maybe
-                                </span>
-                              ) : (
-                                <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-red-50 text-red-700 ring-1 ring-inset ring-red-600/20">
-                                  Not Attending
-                                </span>
-                              )}
-                            </td>
-                            <td className="px-6 py-3 max-w-xs">
-                              {rsvp.message ? (
-                                <p className="text-xs text-slate-600 truncate" title={rsvp.message}>
-                                  {rsvp.message}
-                                </p>
-                              ) : (
-                                <span className="text-slate-400 italic text-xs">-</span>
-                              )}
-                            </td>
-                            <td className="px-6 py-3 text-xs text-slate-500">
-                              {new Date(rsvp.respondedAt).toLocaleDateString('en-US', {
-                                month: 'short',
-                                day: 'numeric',
-                                year: 'numeric',
-                              })}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  )}
-                </div>
-              </div>
-            )}
+                </>
+              )}
+            </div>
           </div>
         </div>
       )}
     </div>
+  );
+}
+
+// ─── Event Row Component ──────────────────────────────────────────────────────
+
+function AdminEventRow({
+  event,
+  onEdit,
+  onDelete,
+  onViewRsvp,
+  onTogglePublish,
+}: {
+  event: EventItemType;
+  onEdit: (e: EventItemType) => void;
+  onDelete: (e: EventItemType) => void;
+  onViewRsvp: (id: string) => void;
+  onTogglePublish: (id: string, pub: boolean) => void;
+}) {
+  return (
+    <div className="flex items-center gap-4 p-4 hover:bg-slate-50 transition">
+      {/* Date block */}
+      <div className="w-14 h-14 rounded-xl bg-slate-100 flex flex-col items-center justify-center text-center shrink-0 overflow-hidden border border-slate-200">
+        <div className="w-full text-white text-[9px] font-bold bg-[#C41E3A] py-0.5">
+          {new Date(event.eventDate).toLocaleDateString('en-US', { month: 'short' }).toUpperCase()}
+        </div>
+        <div className="text-slate-900 font-black text-xl leading-tight">
+          {new Date(event.eventDate).toLocaleDateString('en-US', { day: '2-digit' })}
+        </div>
+      </div>
+
+      {/* Info */}
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2 mb-0.5">
+          <p className="font-bold text-sm text-gray-900 truncate">{event.title}</p>
+          <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold shrink-0 ${
+            event.isPublished ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'
+          }`}>
+            {event.isPublished ? 'Published' : 'Draft'}
+          </span>
+        </div>
+        <div className="flex items-center gap-3 text-xs text-slate-500">
+          <span className="flex items-center gap-1"><Calendar size={12} />{formatDate(event.eventDate)}</span>
+          <span className="flex items-center gap-1"><MapPin size={12} className="shrink-0" /><span className="truncate max-w-[120px]">{event.venue}</span></span>
+          <span className="flex items-center gap-1"><Users size={12} />{event.attendingCount} attending</span>
+        </div>
+        <p className="text-xs text-slate-400 mt-0.5">{event.category}</p>
+      </div>
+
+      {/* Actions */}
+      <div className="flex items-center gap-1.5 shrink-0">
+        <button
+          onClick={() => onViewRsvp(event.id)}
+          title="View RSVPs"
+          className="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition"
+        >
+          <Users size={15} />
+        </button>
+        <button
+          onClick={() => onTogglePublish(event.id, !event.isPublished)}
+          title={event.isPublished ? 'Unpublish' : 'Publish'}
+          className={`p-2 rounded-lg transition ${
+            event.isPublished
+              ? 'text-slate-400 hover:text-amber-600 hover:bg-amber-50'
+              : 'text-slate-400 hover:text-emerald-600 hover:bg-emerald-50'
+          }`}
+        >
+          {event.isPublished ? <EyeOff size={15} /> : <Eye size={15} />}
+        </button>
+        <button
+          onClick={() => onEdit(event)}
+          title="Edit"
+          className="p-2 text-slate-400 hover:text-[#003D7A] hover:bg-blue-50 rounded-lg transition"
+        >
+          <Pencil size={15} />
+        </button>
+        <button
+          onClick={() => onDelete(event)}
+          title="Delete"
+          className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition"
+        >
+          <Trash2 size={15} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ─── Skeleton & Page Export ───────────────────────────────────────────────────
+
+function PageSkeleton() {
+  return (
+    <div className="space-y-6 animate-pulse">
+      <div className="h-10 bg-slate-200 rounded w-1/3" />
+      <div className="h-20 bg-slate-200 rounded-2xl" />
+      <div className="h-64 bg-slate-200 rounded-2xl" />
+    </div>
+  );
+}
+
+export default function EventsManagementPage() {
+  return (
+    <Suspense fallback={<PageSkeleton />}>
+      <AdminEventsClient />
+    </Suspense>
   );
 }

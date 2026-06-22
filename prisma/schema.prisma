@@ -216,6 +216,7 @@ model Alumni {
   startups            StartUp[]
   albums              Album[]
   jobs                Job[]
+  events              Event[]
   sentConnections     Connection[]     @relation("SentConnections")
   receivedConnections Connection[]     @relation("ReceivedConnections")
 
@@ -247,13 +248,19 @@ model Event {
   coverImageUrl String?
   rsvpDeadline  DateTime?
   isPublished   Boolean   @default(false)
-  createdById   String
-  createdBy     Staff     @relation(fields: [createdById], references: [id])
+
+  postedByStaffId  String?
+  postedByStaff    Staff?  @relation(fields: [postedByStaffId], references: [id])
+  postedByAlumniId String?
+  postedByAlumni   Alumni? @relation(fields: [postedByAlumniId], references: [id], onDelete: Cascade)
+
   createdAt     DateTime  @default(now())
 
   rsvps     Rsvp[]
   emailLogs EmailLog[]
 
+  @@index([postedByStaffId])
+  @@index([postedByAlumniId])
   @@index([category])
   @@index([eventDate])
   @@map("events")
