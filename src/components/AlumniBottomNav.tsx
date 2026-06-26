@@ -2,11 +2,12 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { Home, Calendar, Briefcase, User, LogOut, Bell } from 'lucide-react';
+import { Home, Calendar, Briefcase, User, LogOut, Bell, BookOpen } from 'lucide-react';
 
 const navItems = [
   { name: 'Feed', href: '/alumni/feed', icon: Home },
   { name: 'Noticeboard', href: '/alumni/noticeboard', icon: Bell },
+  { name: 'Yearbook', href: '/alumni/yearbook', icon: BookOpen },
   { name: 'Events', href: '/alumni/events', icon: Calendar },
   { name: 'Jobs', href: '/alumni/jobs', icon: Briefcase },
   { name: 'Profile', href: '/alumni/profile', icon: User },
