@@ -59,7 +59,16 @@ export default async function ProtectedAlumniLayout({
               </Link>
             </div>
 
-            {/* Quick Live Status Dot */}
+            {/* Center Yearbook Nav Link */}
+            <Link
+              href="/alumni/yearbook"
+              className="group hidden sm:flex items-center gap-2 px-4 py-1.5 rounded-full border border-[#003D7A]/20 bg-[#003D7A]/5 hover:bg-[#003D7A]/10 hover:border-[#003D7A]/40 transition-all duration-200"
+            >
+              <span className="text-lg">📖</span>
+              <span className="text-xs font-bold text-[#003D7A] tracking-wide">Yearbook</span>
+            </Link>
+
+          {/* Quick Live Status Dot */}
             <div className="flex items-center gap-2 rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700 ring-1 ring-inset ring-emerald-600/10">
               <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
               Portal Connected

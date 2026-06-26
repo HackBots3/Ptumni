@@ -4,7 +4,7 @@ import { useAdminAuth } from '@/hooks/useAdminAuth';
 import { usePathname, useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { Menu, X, LogOut, Users, Calendar, Home, Import, Briefcase, Rocket, LucideIcon } from 'lucide-react';
+import { Menu, X, LogOut, Users, Calendar, Home, Import, Briefcase, Rocket, BookOpen, LucideIcon } from 'lucide-react';
 import { Toaster, toast } from 'react-hot-toast';
 
 // Define the shape of a navigation item
@@ -20,6 +20,7 @@ const allModules: NavItem[] = [
   { name: 'Dashboard', href: '/admin/dashboard', icon: Home, module: 'dashboard' },
   { name: 'Import Alumni', href: '/admin/import', icon: Import, module: 'import' },
   { name: 'Alumni', href: '/admin/alumni', icon: Users, module: 'alumni' },
+  { name: 'Yearbook', href: '/admin/yearbook', icon: BookOpen, module: 'yearbook' },
   { name: 'Opportunities', href: '/admin/jobs', icon: Briefcase, module: 'jobs' },
   { name: 'Events', href: '/admin/events', icon: Calendar, module: 'events' },
   { name: 'Startups', href: '/admin/startups', icon: Rocket, module: 'startups' },
